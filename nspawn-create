@@ -1,0 +1,169 @@
+#!/bin/bash
+
+if [[ $EUID -ne 0 ]];
+then
+  exec sudo /bin/bash "$0" "$@"
+fi
+
+container_dir=/var/lib/machines
+
+function create_arch() {
+  name=$1
+  user=$2
+  container_loc="${container_dir}/${name}"
+
+  pacman -Syu --noconfirm --needed arch-install-scripts 
+  mkdir -p "${container_loc}"
+  pacstrap -K -c "${container_loc}" \
+    base base-devel \
+  ;
+
+  systemd-nspawn -D "${container_loc}" /bin/bash -c '
+    echo -e "Set root password"
+    passwd
+    useradd -m '$user'
+    usermod -a -G wheel '$user'
+    echo -e "Set user ('$user') password"
+    passwd '$user'
+    echo "%wheel ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/wheel-nopasswd
+    pacman -Syu vim
+  '
+}
+
+function create_ubuntu2204() {
+  name=$1
+  user=$2
+  container_loc="${container_dir}/${name}"
+
+  codename=jammy
+  #repo_url=http://archive.ubuntu.com/ubuntu
+  #repo_url=http://ftp.jaist.ac.jp/pub/Linux/ubuntu
+  repo_url=http://ftp.riken.go.jp/Linux/ubuntu
+
+  pacman -Sy --noconfirm --needed debootstrap ubuntu-keyring
+  mkdir -p "${container_loc}"
+  debootstrap \
+    --include=dbus-broker,systemd-container \
+    --components=main,universe \
+    ${codename} \
+    ${container_loc} \
+    ${repo_url} \
+  ;
+
+  systemd-nspawn -D "${container_loc}" /bin/bash -c '
+    apt update
+    apt upgrade
+    apt install -y sudo vim
+    useradd -m '$user'
+    echo -e "Set root password"
+    passwd
+    echo -e "Set user ('$user') password"
+    passwd '$user'
+    # sudo
+    usermod -a -G sudo '$user'
+    echo "%sudo ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/sudo-nopasswd
+    # fix sudo + dns issue
+    hostname=$(hostname)
+    grep -qxF "127.0.0.1 $hostname" /etc/hosts || echo "127.0.0.1 $hostname" >> /etc/hosts 
+  '
+}
+
+
+function create_debian_sid() {
+  user=$2
+  container_loc="${container_dir}/${name}"
+
+  codename=sid
+  repo_url=http://ftp.riken.jp/Linux/debian/debian/
+
+  pacman -Sy --noconfirm --needed debootstrap ubuntu-keyring
+  mkdir -p "${container_loc}"
+  debootstrap \
+    --include=dbus-broker,systemd-container \
+    --components=main,universe \
+    ${codename} \
+    ${container_loc} \
+    ${repo_url} \
+  ;
+
+  systemd-nspawn -D "${container_loc}" /bin/bash -c '
+    apt update
+    apt upgrade
+    apt install -y sudo vim
+    useradd -m '$user'
+    echo -e "Set root password"
+    passwd
+    echo -e "Set user ('$user') password"
+    passwd '$user'
+    # sudo
+    usermod -a -G sudo '$user'
+    echo "%sudo ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/sudo-nopasswd
+    # fix sudo + dns issue
+    hostname=$(hostname)
+    grep -qxF "127.0.0.1 $hostname" /etc/hosts || echo "127.0.0.1 $hostname" >> /etc/hosts   
+
+    # packages
+    apt install -y openssl ca-certificates curl git
+    update-ca-certificates
+  '
+}
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -d|--distro)
+      distro=$2
+      shift # past argument
+      shift # past value
+      ;;
+    -n|--name)
+      name="$2"
+      shift # past argument
+      shift # past value
+      ;;
+    -u|--user)
+      user="$2"
+      shift # past argument
+      shift # past value
+      ;;
+    *)
+      shift # past argument
+      ;;
+  esac
+done
+
+distro=${distro:-UNSPECIFIED}
+timestamp=`date -u +%Y%m%dT%H%M%S%Z`
+
+echo -e "distro is ... $distro"
+echo -e "  Can be specified with \`-d|--distro <distro>\`"
+echo -e "  Available distros: arch ubuntu2204 debian_sid"
+
+name=${name:-$distro-$timestamp}
+echo -e "name is ... $name"
+echo -e "  Can be specified with \`-n|--name <name>\`"
+
+user=${user:-`id -nu 1000`}
+echo -e "user is ... $user"
+echo -e "  Can be specified with \`-u|--user <user>\`"
+
+read -r -p "Are you sure? [y/N] " response
+case "$response" in
+  [yY][eE][sS]|[yY]) 
+    ;;
+  *)
+    echo -e "Exit"
+    exit 0
+    ;;
+esac
+
+if [[ "${distro}" == arch ]]; then
+  create_arch $name $user
+elif [[ "${distro}" == ubuntu2204 ]] ; then
+  create_ubuntu2204 $name $user
+elif [[ "${distro}" == debian_sid ]] ; then
+  create_debian_sid $name $user
+else
+  echo -e "  A valid distro must be specified but is not. Exit."
+  exit 1
+fi
+
